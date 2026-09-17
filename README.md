@@ -19,12 +19,14 @@ measurable, and inspectable rather than a thin wrapper around a datacentre.
 | Self-distillation (EMA) | works | no external dependency |
 | API-teacher distillation | opt-in | only if you hold the keys |
 | Reports | works | text + self-contained HTML |
+| **Control kernel** | works | capability scoping, reversible actions, earned autonomy |
+| **Model-to-machine bridge** | works | model text -> typed plan, never executed as code |
 
 ## Quick start
 
 ```bash
 python3 -m pip install numpy torch
-python3 -m pytest tests/ -q          # 35 tests, ~4s
+python3 -m pytest tests/ -q          # 95 tests, ~3.4s
 python3 -m forge.demo --steps 250    # trains, generates, debates, reports
 ```
 
@@ -167,6 +169,43 @@ print(collect_teacher_texts(['def parse(x):']).keys())
 
 Missing keys are skipped, never simulated.
 
+## Controlling a machine (the "bounded agency" layer)
+
+`forge/control/` answers a different question from the rest of the repo: not
+"can it think", but "how does a model operate a computer without becoming a
+liability". Full write-up in [docs/BOUNDED_AGENCY.md](docs/BOUNDED_AGENCY.md).
+
+```bash
+python3 -m forge.control_demo
+```
+
+Four enforced principles:
+
+1. **Capability, not filtering** - no delete capability means no delete is
+   expressible, whatever the model says.
+2. **Reversibility by construction** - every mutation records its own inverse;
+   even `delete` only quarantines. Nothing here ever unlinks a file.
+3. **Earned autonomy** - `dry_run -> approval -> auto`, per operation class,
+   promoted on verified successes and dropped to `dry_run` on one failure.
+4. **Verify against the machine** - post-conditions are checked on the real
+   filesystem, never taken from the model's claim.
+
+Model output is parsed into a typed plan and is **never executed as code**.
+That yields two independent layers, which the demo shows biting:
+
+```
+attack             | model acted | stopped by
+-------------------+-------------+------------------
+injection via code | no          | grammar (layer 1)
+absolute escape    | no          | kernel  (layer 2)
+shell metachar     | no          | grammar (layer 1)
+secrets file       | no          | kernel  (layer 2)
+```
+
+Honest limits, stated in the same document: the audit chain is tamper
+*evident*, not tamper *proof*; and autonomy has to be **seeded** by a human,
+because a class at `dry_run` can never earn promotion by itself.
+
 ## Layout
 
 ```
@@ -190,6 +229,14 @@ forge/
   training/
     trainer.py        LM + vision loops, cosine LR, checkpoints
     distill.py        EMA self-distillation, optional API teachers
+  control/
+    scope.py          capability tokens, PathGuard, deny by default
+    actions.py        reversible actions, transactions, quarantine
+    audit.py          hash-chained tamper-evident log
+    trust.py          earned autonomy: dry_run -> approval -> auto
+    world.py          budgeted, self-truncation-reporting perception
+    kernel.py         perceive-plan-simulate-approve-act-verify
+    bridge.py         model text -> typed plan (never executed as code)
   viz/                text renderers + standalone HTML report
 ```
 
@@ -241,6 +288,12 @@ asserted in the test suite, not merely printed.
 - judge refuses to accept unevidenced work even when the model says "accept"
 - policy gate blocks a malicious agent's output mid-debate
 - scope check rejects public hosts and honours an explicit allowlist
+
+Plus the control layer: symlink escape blocked, an empty capability set
+denies everything, expired grants denied, audit tampering detected with the
+exact break index, transactions roll back fully, quarantine restores bytes
+intact, trust cannot bootstrap itself, low confidence escalates even at auto,
+and an adversarial model's `exec(...)` output cannot parse.
 
 ```bash
 python3 -m pytest tests/ -q
