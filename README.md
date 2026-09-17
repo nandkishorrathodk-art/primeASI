@@ -10,7 +10,8 @@ measurable, and inspectable rather than a thin wrapper around a datacentre.
 
 | Component | Status | Notes |
 |---|---|---|
-| Byte tokenizer | works | dependency-free, VOCAB 260 |
+| Byte tokenizer | works | dependency-free baseline, VOCAB 260 |
+| BPE tokenizer | works | trained on-corpus, VOCAB 1024, 1 token for `mkdir` |
 | MoE transformer LLM | trains | shared + routed experts, load balancing |
 | Vision tower | trains | patch encoder, reaches ~95% on synthetic task |
 | Multi-agent debate loop | works | 5 sub-agents + judge |
@@ -28,7 +29,7 @@ measurable, and inspectable rather than a thin wrapper around a datacentre.
 
 ```bash
 python3 -m pip install numpy torch
-python3 -m pytest tests/ -q           # 117 tests, ~3.6s
+python3 -m pytest tests/ -q           # 136 tests, ~5.9s
 python3 -m forge.demo --steps 250     # trains, generates, debates, reports
 python3 -m forge.control_demo         # 11 control sections on a real filesystem
 python3 -m forge.pipeline_demo --steps 150   # the whole chain, end to end
@@ -276,6 +277,86 @@ non-accepted run leaves the ledger empty. The judge approves the *work*; it
 does not approve the *target*, which is why a well-formed debate naming a
 secrets file still gets refused by the kernel on its own authority.
 
+## BPE tokenizer, larger context, and what the model still cannot do
+
+Three measured improvements and one honest failure. All numbers reproduced on
+4 CPU cores.
+
+### Measured, not assumed
+
+```
+                                     before      after
+vocabulary                           260         1024 (trained BPE)
+tokens for 'mkdir'                   5           1
+grammar prompt size                  418 tokens  83 tokens
+model context                        128         256
+throughput @256 context              -           9,009 tok/s
+```
+
+The 128-token context was the worst of these: the grammar prompt did not fit,
+so the model was being asked to follow instructions it physically could not
+see. The byte tokenizer cost 1.00 tokens per character, so the instruction
+block alone exceeded the window.
+
+### The bug that mattered most
+
+`corpus_to_tensor` defaulted to the module-level byte tokenizer, and the
+trainer never passed its own. A model built with a 1024-token BPE vocabulary
+was therefore trained on **byte ids**. Training ran, the loss fell, nothing
+raised an error -- but the embedding table was half unused and the ids were
+meaningless. It only became visible when generation was actually checked
+rather than when training was watched.
+
+Fix: the tokenizer is passed explicitly, and it is now **stored in the
+checkpoint** so a model can never be decoded with the wrong vocabulary.
+Decoding a BPE model with a byte tokenizer produces gibberish silently, which
+is the worst possible failure mode.
+
+### The honest failure
+
+With BPE, 256-token context, and 40% of the corpus teaching the plan grammar:
+**the model still produces 0/3 parseable plans.** Measured diagnostics:
+
+```
+loss on prompt region : 10.79      the model cannot even predict the prompt
+loss on plan region   : 4.43       and does not know the grammar
+corpus duplicate ratio: 91.2%      271 unique lines out of 3,090
+grammar prompt in training data: 0 occurrences
+```
+
+Three separate problems, in order of severity:
+
+1. **The inference prompt format appears zero times in training.** The model
+   is given `Output only plan lines:` and has never seen that string. It
+   cannot condition on instructions it has never seen, so it falls back to
+   whatever dominates the corpus -- which is agent-JSON:
+   `{"agent": "architecture", "action": "critique", ...}` repeated until the
+   token budget runs out. That is exactly the observed output.
+
+2. **The corpus is 91% duplicate.** 271 unique lines repeated to 3,090. A
+   language model trained on near-duplicate text learns to regurgitate, not
+   to generalise, and any held-out compression number is meaningless.
+
+3. **The model is far too small to follow a system prompt.** 2.7M parameters
+   at 20k parameters per context token cannot hold instruction-following
+   behaviour. This is a scale limit, not a bug, and it is the honest ceiling
+   on what this repository can demonstrate.
+
+The pipeline handles all three correctly: they are limitations of the model,
+not of the control layer. The action channel still produces a deterministic,
+audited action, and the substitution is recorded. But the headline stays
+`model parsed own output : False`.
+
+### What would actually fix it
+
+Not more parameters. In measured order of impact:
+
+1. **Train on the exact inference format.** Every training example should be
+   `[system prompt][user turn][plan]`, the same shape the channel sends.
+2. **A corpus that is not 91% duplicates**, at least tens of MB.
+3. **More compute than a 4-core CPU**, which is the honest end of what this
+   environment can offer.
+
 ## Layout
 
 ```
@@ -350,7 +431,7 @@ asserted in the test suite, not merely printed.
 
 ## Test suite
 
-35 tests, ~3.4s, no mocks - everything exercises real code paths:
+136 tests, ~5.9s, no mocks - everything exercises real code paths:
 
 - tokenizer round-trip including multibyte UTF-8
 - MoE: shared experts actually contribute, expert-choice routing is balanced,
