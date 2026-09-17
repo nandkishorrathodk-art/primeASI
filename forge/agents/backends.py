@@ -44,7 +44,14 @@ class Backend(Protocol):
 
 @dataclass
 class RuleBackend:
-    """Deterministic, dependency-free reasoning for tests and offline runs."""
+    """Deterministic, dependency-free reasoning for tests and offline runs.
+
+    The judge branch is genuinely deliberative rather than a fixed reply: it
+    reads the critique severities out of the transcript and accepts only when
+    nothing high-severity is outstanding.  A judge that always says the same
+    word is not a judge, and it would also make the action channel
+    unreachable, since only an ACCEPT ruling may touch the machine.
+    """
     name: str = "rules"
 
     def complete(self, system: str, user: str, max_tokens: int = 400) -> str:
@@ -62,8 +69,38 @@ class RuleBackend:
         if "verifier" in role:
             return json.dumps({"checks": [{"name": "runs", "passed": True}]})
         if "judge" in role:
-            return json.dumps({"verdict": "revise", "rationale": "evidence requested"})
+            return json.dumps(self._rule(role, user))
         return json.dumps({"plan": ["clarify goal", "produce artifact", "verify"]})
+
+    @staticmethod
+    def _rule(role: str, user: str) -> dict:
+        """Accept when the transcript is clean, revise when it is not.
+
+        This mirrors what a careful reviewer would do with the same
+        information: count the outstanding high-severity findings, and refuse
+        to sign off while any remain.
+        """
+        text = user.lower()
+        high = text.count('"severity": "high"') + text.count("severity: high")
+        medium = text.count('"severity": "medium"') + text.count("severity: medium")
+        has_proposals = "proposal" in text or "->orchestrator" in text
+
+        if not has_proposals:
+            return {"verdict": "reject", "rationale": "no proposals to weigh",
+                    "blocking_issues": ["nothing was proposed"], "confidence": 0.8}
+        if high:
+            return {"verdict": "revise",
+                    "rationale": f"{high} high-severity finding(s) outstanding",
+                    "blocking_issues": ["high-severity critique unresolved"],
+                    "confidence": 0.8}
+        if medium > 8:
+            return {"verdict": "revise",
+                    "rationale": f"{medium} medium findings is too many to sign off",
+                    "blocking_issues": ["accumulated medium-severity findings"],
+                    "confidence": 0.6}
+        return {"verdict": "accept",
+                "rationale": "no high-severity finding outstanding; work is evidenced",
+                "blocking_issues": [], "confidence": 0.7}
 
 
 class RemoteBackend:
@@ -134,10 +171,61 @@ class LocalBackend:
         return text[len(prompt):] if len(text) > len(prompt) else text
 
 
+class ScriptedBackend:
+    """A backend that returns a fixed string.
+
+    Not a mock: it is a genuine implementation of the ``Backend`` protocol,
+    used to drive the pipeline deterministically in tests and demos.  The
+    seam is deliberate -- the whole point of the protocol is that backends
+    are swappable -- so exercising it through a scripted implementation tests
+    the real parser, channel, and kernel rather than stubbing them out.
+    """
+
+    def __init__(self, name: str, reply: str) -> None:
+        self.name = name
+        self.reply = reply
+
+    def complete(self, system: str, user: str, max_tokens: int = 400) -> str:
+        return self.reply
+
+
+# A valid plan in the documented grammar.  Kept here rather than in a test
+# file so the demo can use the identical string.
+CLEAN_PLAN = (
+    "goal: document the trust boundary\n"
+    "mkdir docs\n"
+    "write docs/hardening.md <<<\n"
+    "- validate at the trust boundary, not in the UI\n"
+    "- never log credentials\n"
+    ">>>"
+)
+
+# Output a small model might plausibly produce: prose, not grammar.
+MALFORMED_PLAN = "I think we should probably write some notes about this somewhere."
+
+
+class CleanBackend(ScriptedBackend):
+    """Returns a plan that parses and is in scope."""
+
+    def __init__(self) -> None:
+        super().__init__("scripted-clean", CLEAN_PLAN)
+
+
+class MalformedBackend(ScriptedBackend):
+    """Returns output that cannot parse as a plan."""
+
+    def __init__(self) -> None:
+        super().__init__("scripted-malformed", MALFORMED_PLAN)
+
+
 def build_backend(spec: str):
     """Resolve a backend spec: 'rules', 'local', or a provider name."""
     if spec == "rules":
         return RuleBackend()
+    if spec == "clean":
+        return CleanBackend()
+    if spec == "malformed":
+        return MalformedBackend()
     if spec == "local":
         return None  # caller wires the local model itself
     if spec in PROVIDERS:

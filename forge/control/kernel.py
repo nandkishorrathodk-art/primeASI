@@ -88,10 +88,15 @@ class RunOutcome:
     skipped: list[StepOutcome] = field(default_factory=list)
     verification: Optional[VerifyResult] = None
     audit_head: str = ""
+    rolled_back: int = 0
+
+    @property
+    def failed_verifications(self) -> list[StepOutcome]:
+        return [o for o in self.executed if not o.verified]
 
     @property
     def success(self) -> bool:
-        if self.skipped:
+        if self.skipped or self.rolled_back:
             return False
         return all(o.verified for o in self.executed) if self.executed else False
 
@@ -101,6 +106,7 @@ class RunOutcome:
             "executed": len(self.executed),
             "skipped": len(self.skipped),
             "verified": sum(1 for o in self.executed if o.verified),
+            "rolled_back": self.rolled_back,
             "success": self.success,
             "audit_head": self.audit_head[:16],
         }
@@ -215,6 +221,10 @@ class ControlKernel:
     # -- act -------------------------------------------------------------
     def execute(self, plan: Plan, simulate_first: bool = True) -> RunOutcome:
         outcome = RunOutcome(goal=plan.goal)
+        # Auto-rollback must only unwind what *this run* did.  Undoing the
+        # whole ledger would also reverse earlier, legitimate work -- and
+        # would delete files this run never touched.
+        mark = len(self.ledger.history())
 
         if simulate_first:
             sim = self.simulate(plan)
@@ -266,10 +276,35 @@ class ControlKernel:
                     res.undo.description if res.undo else None,
                 ))
 
+        # A plan that mutated the machine but failed verification leaves the
+        # world in a state nobody checked.  Unwinding it automatically is the
+        # only defensible default: partial, unverified change is worse than
+        # no change, because the next decision is made on false premises.
+        if outcome.failed_verifications:
+            outcome.rolled_back = self._rollback_since(mark)
+            self.audit.append("kernel", "auto_rollback", {
+                "goal": plan.goal,
+                "failed_steps": [o.step.describe() for o in outcome.failed_verifications],
+                "undone": outcome.rolled_back,
+            })
+
         outcome.verification = self.audit.verify()
         outcome.audit_head = self.audit.head()
         self.audit.append("kernel", "run_complete", outcome.summary())
         return outcome
+
+    def _rollback_since(self, mark: int) -> int:
+        """Undo actions recorded at or after ``mark``, newest first.
+
+        Newest-first matters when several steps touched the same path: the
+        last writer's inverse restores the state the earlier inverse expects.
+        """
+        n = 0
+        for res in reversed(self.ledger.history()[mark:]):
+            if res.undo and not res.undo.undone:
+                res.undo.apply()
+                n += 1
+        return n
 
     def _dispatch(self, step: Step) -> ActionResult:
         if step.op is Op.WRITE:

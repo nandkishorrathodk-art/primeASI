@@ -21,13 +21,17 @@ measurable, and inspectable rather than a thin wrapper around a datacentre.
 | Reports | works | text + self-contained HTML |
 | **Control kernel** | works | capability scoping, reversible actions, earned autonomy |
 | **Model-to-machine bridge** | works | model text -> typed plan, never executed as code |
+| **Action channel** | works | debate -> judge -> one verified machine action |
+| **End-to-end pipeline** | works | `python3 -m forge.pipeline_demo` |
 
 ## Quick start
 
 ```bash
 python3 -m pip install numpy torch
-python3 -m pytest tests/ -q          # 95 tests, ~3.4s
-python3 -m forge.demo --steps 250    # trains, generates, debates, reports
+python3 -m pytest tests/ -q           # 117 tests, ~3.6s
+python3 -m forge.demo --steps 250     # trains, generates, debates, reports
+python3 -m forge.control_demo         # 11 control sections on a real filesystem
+python3 -m forge.pipeline_demo --steps 150   # the whole chain, end to end
 ```
 
 The demo prints a trained-model sample, MoE routing usage, the vision accuracy
@@ -206,6 +210,72 @@ Honest limits, stated in the same document: the audit chain is tamper
 *evident*, not tamper *proof*; and autonomy has to be **seeded** by a human,
 because a class at `dry_run` can never earn promotion by itself.
 
+## The whole chain, connected
+
+For most of this project's life there were three islands that never spoke: a
+model that trained, agents that debated, and a kernel that could operate a
+filesystem. `forge/agents/act.py` is the wire between them, and
+`forge.pipeline_demo` runs the result.
+
+```
+ForgeLM trains
+     |
+     v
+5 sub-agents debate  ->  policy gate  ->  judge verdict
+                                               |
+                          (only ACCEPT has authority over the machine)
+                                               v
+                          plan request in a strict grammar
+                                               |
+                     model output parses? ----+---- no ---> deterministic
+                              |  yes                            fallback,
+                              v                                recorded in
+                     simulate: scope, trust,                    the audit
+                     preconditions, risk surface                chain
+                              |
+                              v
+                     execute -> verify against real disk
+                              |
+                    verification failed? -> auto-rollback
+                              |
+                              v
+                     hash-chained audit, tamper-evident
+```
+
+Run it:
+
+```bash
+python3 -m forge.pipeline_demo --steps 150
+```
+
+### The honest headline
+
+**A 2.6M-parameter byte-level model does not emit parseable plans.** The demo
+prints `model parsed own output : False` and `used fallback : True`, rather
+than pretending otherwise. This is expected at this scale and it is the single
+most useful signal the pipeline produces: it tells you exactly what to work on
+next.
+
+The pipeline handles it the way it should. An unparseable proposal still
+produces a *deterministic, auditable* action instead of nothing, and the
+substitution is recorded in the audit chain as `fallback` -- visible, never
+silent. A pipeline that quietly swaps in rules and reports success is lying
+about what ran.
+
+### Why the fallback is not a model call
+
+Calling a backend and then ignoring its reply is theatre. The fallback is a
+pure function from task to plan text (`default_fallback_plan`), so it is
+deterministic and reproducible. There is no backend involved.
+
+### Nothing acts before the debate concludes
+
+Only an `ACCEPT` ruling has authority over the machine. A `REVISE` or
+`REJECT` cannot reach the kernel at all -- there is a test asserting that a
+non-accepted run leaves the ledger empty. The judge approves the *work*; it
+does not approve the *target*, which is why a well-formed debate naming a
+secrets file still gets refused by the kernel on its own authority.
+
 ## Layout
 
 ```
@@ -237,6 +307,9 @@ forge/
     world.py          budgeted, self-truncation-reporting perception
     kernel.py         perceive-plan-simulate-approve-act-verify
     bridge.py         model text -> typed plan (never executed as code)
+  agents/
+    act.py            ActionChannel: debate -> judge -> verified action
+    local.py          wire a trained checkpoint in as a backend
   viz/                text renderers + standalone HTML report
 ```
 
@@ -293,7 +366,9 @@ Plus the control layer: symlink escape blocked, an empty capability set
 denies everything, expired grants denied, audit tampering detected with the
 exact break index, transactions roll back fully, quarantine restores bytes
 intact, trust cannot bootstrap itself, low confidence escalates even at auto,
-and an adversarial model's `exec(...)` output cannot parse.
+an adversarial model's `exec(...)` output cannot parse, only an ACCEPT ruling
+reaches the machine, auto-rollback unwinds just the failed run and not earlier
+work, and a debate that approves work naming a secrets file is still refused.
 
 ```bash
 python3 -m pytest tests/ -q

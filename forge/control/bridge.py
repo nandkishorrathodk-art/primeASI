@@ -58,12 +58,17 @@ class ParseResult:
         return self.plan is not None and not self.errors
 
 
-def parse_plan(text: str, base_dir: str = "") -> ParseResult:
+def parse_plan(text: str, base_dir: str = "", max_steps: int = 0) -> ParseResult:
     """Turn model text into a typed Plan.  Strict: unknown syntax is an error.
 
     ``base_dir`` is prepended to relative paths so the model can work in
     relative terms without being able to name an absolute location itself.
     The kernel's PathGuard still applies afterwards.
+
+    ``max_steps`` stops collection after that many steps.  Bounding here rather
+    than trimming the resulting plan keeps the parsed plan and the text that
+    produced it in agreement; otherwise a caller limbos the plan but the bridge
+    re-parses the full text and runs everything anyway.
     """
     import os
 
@@ -73,6 +78,9 @@ def parse_plan(text: str, base_dir: str = "") -> ParseResult:
     steps: list[Step] = []
 
     for raw_line in _statements(text):
+        if max_steps and len(steps) >= max_steps:
+            warnings.append(f"step limit {max_steps} reached; later steps ignored")
+            break
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -107,6 +115,17 @@ def parse_plan(text: str, base_dir: str = "") -> ParseResult:
             continue
 
         if op is Op.RUN_TESTS:
+            # Defence in depth: the ledger would refuse a non-allowlisted
+            # command anyway, but the grammar layer should never let one
+            # through in the first place.  Two independent layers is the whole
+            # point; letting the outer one be permissive wastes it.
+            from forge.control.actions import ALLOWED_COMMANDS
+
+            if rest not in ALLOWED_COMMANDS:
+                errors.append(
+                    f"run_tests command {rest[:40]!r} is not allowlisted"
+                )
+                continue
             steps.append(Step(op=op, command=rest))
             continue
 
@@ -209,9 +228,10 @@ def model_drives_machine(
     kernel: ControlKernel,
     base_dir: str = "",
     execute: bool = True,
+    max_steps: int = 0,
 ) -> BridgeOutcome:
     """Parse model output and, if it parses, offer it to the kernel."""
-    parsed = parse_plan(model_text, base_dir=base_dir)
+    parsed = parse_plan(model_text, base_dir=base_dir, max_steps=max_steps)
     if not parsed.ok:
         kernel.audit.append("bridge", "parse_failed",
                             {"errors": parsed.errors})

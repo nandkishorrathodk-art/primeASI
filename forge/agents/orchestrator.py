@@ -33,6 +33,7 @@ class RunResult:
     rounds: list[Round] = field(default_factory=list)
     final: Optional[Ruling] = None
     accepted: bool = False
+    channel: Optional[object] = None       # ChannelResult, when a channel is wired
 
     def summary(self) -> dict:
         return {
@@ -42,6 +43,8 @@ class RunResult:
             "verdict": self.final.verdict.value if self.final else None,
             "blocked": [b for r in self.rounds for b in r.blocked],
             "rationale": self.final.rationale if self.final else None,
+            "acted": getattr(self.channel, "acted", False),
+            "action": self.channel.summary() if self.channel else None,
         }
 
 
@@ -53,12 +56,18 @@ class Orchestrator:
         blackboard: Optional[Blackboard] = None,
         max_rounds: int = 3,
         on_event: Optional[Callable[[str, dict], None]] = None,
+        channel: Optional[object] = None,
+        act_on_accept: bool = True,
     ) -> None:
         self.team = team
         self.judge = judge
         self.board = blackboard or Blackboard()
         self.max_rounds = max_rounds
         self.on_event = on_event or (lambda name, payload: None)
+        # Optional ActionChannel.  When absent the orchestrator debates and
+        # stops, exactly as before -- wiring the machine in is opt-in.
+        self.channel = channel
+        self.act_on_accept = act_on_accept
 
     def _emit(self, name: str, **payload) -> None:
         self.on_event(name, payload)
@@ -125,6 +134,20 @@ class Orchestrator:
             if ruling.verdict is Verdict.ACCEPT:
                 result.final = ruling
                 result.accepted = True
+                # Acceptance is the only point at which the machine may be
+                # touched.  The gate above the machine is separate from the
+                # gate inside it: a debate can be wrong, the kernel cannot be
+                # talked out of a capability check.
+                if self.channel is not None and self.act_on_accept:
+                    try:
+                        result.channel = self.channel.act(
+                            task, ruling, blackboard=self.board
+                        )
+                        self._emit("action", **result.channel.summary())
+                    except Exception as exc:          # never lose the debate result
+                        self.board.write("action_error", str(exc),
+                                         author="orchestrator")
+                        self._emit("action_error", error=str(exc))
                 break
             if ruling.verdict is Verdict.REJECT and r == self.max_rounds:
                 result.final = ruling
