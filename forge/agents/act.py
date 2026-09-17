@@ -40,25 +40,17 @@ from forge.control.bridge import BridgeOutcome, model_drives_machine, parse_plan
 from forge.control.kernel import ControlKernel
 from forge.control.scope import Op
 
-# The plan grammar, shown to the model verbatim.  Kept short on purpose: a
-# small model conditions better on a few exact lines than on prose.
-GRAMMAR_PROMPT = """You output only lines in this exact grammar. No prose, no code.
-
-goal: <one short line>
+# The plan grammar, sent to the model verbatim.  Kept short deliberately: an
+# earlier 418-token version did not fit a 128-token context at all, so the
+# model was being asked to follow instructions it could not see.  This version
+# measures about 83 tokens with the trained BPE vocabulary.
+GRAMMAR_PROMPT = """Output only plan lines:
+goal: <slug>
 mkdir <path>
 write <path> <<<content>>>
-append <path> <<<content>>>
 read <path>
-list <path>
-stat <path>
-delete <path>
-run_tests <command-name>
-
-Rules:
-- One step per line.
-- Valid <path> values: docs/notes.md, src/report.txt, notes/plan.md
-- Never use an absolute path. Never use ; | & $ ` or > in a path.
-- Write at most 3 steps."""
+run_tests <name>
+Paths must be relative. At most 3 steps."""
 
 # Targets a small model can plausibly emit and that are always in scope.
 SAFE_DEFAULT_PATHS = ["docs/notes.md", "notes/plan.md", "src/notes.md"]

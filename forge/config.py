@@ -42,7 +42,10 @@ class ModelConfig:
     dim: int = 128
     n_layers: int = 4
     n_heads: int = 4
-    max_seq_len: int = 128
+    # Measured on 4 CPU cores: 256 costs ~9.0k tok/s, 512 costs ~5.5k (3.3x
+    # slower per step for 2x context).  128 could not fit even a compact
+    # grammar prompt, so the model was asked a question it could not see.
+    max_seq_len: int = 256
     dropout: float = 0.0
     tie_embeddings: bool = True
     moe: MoEConfig = field(default_factory=MoEConfig)
@@ -64,7 +67,7 @@ class ModelConfig:
 @dataclass
 class TrainConfig:
     batch_size: int = 16
-    seq_len: int = 128
+    seq_len: int = 256
     steps: int = 200
     lr: float = 3e-4
     weight_decay: float = 0.1

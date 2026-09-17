@@ -55,11 +55,103 @@ def _random_agent_line(rng: random.Random) -> str:
     )
 
 
-def make_corpus(n_snippets: int = 400, seed: int = 0) -> str:
-    """Structured text: code + prose + agent-JSON lines."""
+# ---------------------------------------------------------- plan grammar data
+
+PLAN_TASKS = [
+    "harden the input parser", "document the trust boundary",
+    "record the threat model", "write the hardening notes",
+    "capture the audit findings", "note the routing tradeoffs",
+    "summarise the vision encoder risks", "record the review outcome",
+    "draft the security policy", "log the validation rules",
+    "document the failure modes", "note the detection rules",
+]
+
+PLAN_SLUGS = [
+    "harden-the-input-parser", "document-the-trust-boundary",
+    "record-the-threat-model", "write-the-hardening-notes",
+    "capture-the-audit-findings", "note-the-routing-tradeoffs",
+    "summarise-the-encoder-risks", "record-the-review-outcome",
+]
+
+PLAN_BODIES = [
+    "- validate at the trust boundary, not in the UI\n- never log credentials",
+    "- reject input you cannot parse\n- fail closed, not open",
+    "- hash passwords with a salted slow KDF\n- rotate tokens on privilege change",
+    "- treat every external field as hostile\n- log the decision, not the secret",
+    "- prefer constant-time comparison for tokens\n- alert on repeated failures",
+    "- record the threat model before the patch\n- one change per review",
+]
+
+
+def make_grammar_corpus(n: int = 400, seed: int = 0,
+                        include_prompts: bool = True) -> str:
+    """Examples in exactly the grammar the action channel asks the model for.
+
+    This exists because of a measured gap: the original corpus contained
+    **zero** occurrences of ``mkdir``, ``write``, ``goal:``, ``<<<`` or
+    ``>>>``.  The pipeline was asking the model to emit a language it had
+    never seen a single example of.  No amount of parameters or tokenizer
+    work fixes that; the examples have to be present.
+
+    The prompt comes *before* the plan, matching how the channel actually
+    calls the model.  Reversing that order would train the model to emit a
+    question after its answer.
+
+    ``include_prompts=False`` yields plan blocks alone, which is what the
+    parser tests need: a prompt line is not a plan step and must not be
+    expected to parse as one.
+    """
+    rng = random.Random(seed)
+    blocks: list[str] = []
+    for _ in range(n):
+        task = rng.choice(PLAN_TASKS)
+        slug = rng.choice(PLAN_SLUGS)
+        body = rng.choice(PLAN_BODIES)
+        pad = " " * rng.choice([0, 0, 2, 4])
+        steps = [
+            "goal: " + slug,
+            "mkdir docs",
+            f"write docs/{slug}.md <<<",
+            body,
+            ">>>",
+        ]
+        if rng.random() < 0.3:
+            steps.append(f"read docs/{slug}.md")
+        if rng.random() < 0.2:
+            steps.append("run_tests run_tests")
+        plan = "\n".join(pad + s for s in steps)
+        if include_prompts:
+            blocks.append(f"Task: {task}\nProduce at most {len(steps)} steps.")
+        blocks.append(plan)
+    return "\n".join(blocks)
+
+
+def iter_plan_examples(n: int = 50, seed: int = 0):
+    """Yield individual plan blocks that should each parse on their own."""
+    slug = "x"
+    rng = random.Random(seed)
+    for _ in range(n):
+        s = rng.choice(PLAN_SLUGS)
+        body = rng.choice(PLAN_BODIES)
+        yield (
+            "goal: " + s + "\n"
+            "mkdir docs\n"
+            f"write docs/{s}.md <<<\n{body}\n>>>"
+        )
+
+
+def make_corpus(n_snippets: int = 400, seed: int = 0,
+                grammar_ratio: float = 0.4) -> str:
+    """Structured text: code, prose, agent JSON, and plan-grammar examples.
+
+    ``grammar_ratio`` controls how much of the corpus teaches the plan
+    grammar the action channel depends on.  It defaults high because that
+    grammar is what the end-to-end pipeline needs the model to emit.
+    """
     rng = random.Random(seed)
     parts: list[str] = []
-    for i in range(n_snippets):
+    n_grammar = max(1, int(n_snippets * grammar_ratio))
+    for i in range(n_snippets - n_grammar):
         kind = i % 3
         if kind == 0:
             parts.append(rng.choice(CODING_SNIPPETS))
@@ -67,11 +159,22 @@ def make_corpus(n_snippets: int = 400, seed: int = 0) -> str:
             parts.append(rng.choice(SECURITY_SNIPPETS))
         else:
             parts.append("\n".join(_random_agent_line(rng) for _ in range(4)))
+    parts.append(make_grammar_corpus(n_grammar, seed=seed + 1))
+    rng.shuffle(parts)
     return "\n".join(parts)
 
 
-def corpus_to_tensor(text: str) -> torch.Tensor:
-    ids = TOKENIZER.encode(text, add_bos=False, add_eos=False)
+def corpus_to_tensor(text: str, tokenizer=None) -> torch.Tensor:
+    """Encode a corpus with the given tokenizer.
+
+    The tokenizer must be passed explicitly.  It previously defaulted to the
+    module-level byte tokenizer, so a model built with a BPE vocabulary was
+    trained on byte ids: half its embedding rows went untouched and the ids it
+    did see were meaningless. Training still ran and the loss still fell,
+    which is exactly why this went unnoticed until generation was checked.
+    """
+    tok = tokenizer or TOKENIZER
+    ids = tok.encode(text, add_bos=False, add_eos=False)
     return torch.tensor(ids, dtype=torch.long)
 
 
