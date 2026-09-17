@@ -26,7 +26,9 @@ from forge.config import ForgeConfig
 from forge.control.kernel import ControlKernel
 from forge.control.scope import Op
 from forge.control.trust import Level
+from forge.data import corpus_to_tensor, make_corpus
 from forge.model.transformer import ForgeLM
+from forge.tokenizer import BPETokenizer
 from forge.training.trainer import Trainer
 from forge.viz import table
 from forge.viz.report import build_report
@@ -61,14 +63,23 @@ def main() -> None:
 
     # ---------------------------------------------------------------- 1
     section("1. TRAIN THE MODEL")
+    # Train the tokenizer on the same corpus the model learns from, so the
+    # vocabulary and the task share one distribution.
+    corpus = make_corpus(600, seed=0)
+    tokenizer = BPETokenizer.train(corpus, vocab_size=1024)
+    cfg.model.vocab_size = tokenizer.vocab_size
     model = ForgeLM(cfg.model)
-    trainer = Trainer(cfg, model)
-    logs = trainer.train_lm(on_step=lambda l: None)
+    trainer = Trainer(cfg, model, tokenizer=tokenizer)
+    logs = trainer.train_lm(text=corpus, on_step=lambda l: None)
     ckpt = os.path.join(cfg.train.out_dir, "model.pt")
     trainer.save(ckpt)
     first = sum(l.loss for l in logs[:10]) / 10
     last = sum(l.loss for l in logs[-10:]) / 10
+    n_tok = len(corpus_to_tensor(corpus, tokenizer))
     print(f"  parameters : {model.num_params():,}")
+    print(f"  vocabulary : {tokenizer.vocab_size} (trained BPE)")
+    print(f"  corpus     : {len(corpus):,} chars -> {n_tok:,} tokens")
+    print(f"  epochs     : {cfg.train.steps * cfg.train.batch_size * cfg.train.seq_len / n_tok:.1f}")
     print(f"  loss       : {first:.4f} -> {last:.4f}")
     print(f"  checkpoint : {ckpt}")
 

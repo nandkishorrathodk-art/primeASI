@@ -18,34 +18,58 @@ from forge.model.vision import PatchVisionEncoder
 
 
 class CausalSelfAttention(nn.Module):
+    """Grouped-Query Attention with a KV cache.
+
+    ``n_heads`` query heads share ``kv_heads`` key/value heads.  When the two
+    are equal this is plain multi-head attention; when kv_heads < n_heads each
+    KV head is broadcast across a group of query heads.  That shrinks both the
+    attention parameter count and the KV cache, which is the memory cost that
+    actually bites during generation -- and caching more cheaply is what lets
+    a longer prefix be kept resident.
+
+    The grouping is done with ``repeat_interleave`` rather than a reshape so
+    the correspondence is explicit: query heads ``[g*k, g*k+1, ...]`` map to
+    KV head ``g``.
+    """
+
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
-        assert cfg.dim % cfg.n_heads == 0
+        assert cfg.dim % cfg.n_heads == 0, "dim must divide n_heads"
+        n_kv = cfg.kv_heads()
+        assert cfg.n_heads % n_kv == 0, "n_heads must be a multiple of kv_heads"
         self.n_heads = cfg.n_heads
+        self.n_kv_heads = n_kv
+        self.group = cfg.n_heads // n_kv
         self.head_dim = cfg.dim // cfg.n_heads
-        self.qkv = nn.Linear(cfg.dim, 3 * cfg.dim, bias=False)
+
+        self.q_proj = nn.Linear(cfg.dim, self.n_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(cfg.dim, n_kv * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(cfg.dim, n_kv * self.head_dim, bias=False)
         self.proj = nn.Linear(cfg.dim, cfg.dim, bias=False)
         self.drop = nn.Dropout(cfg.dropout)
 
+    def _split(self, z: torch.Tensor, n_heads: int, b: int, t: int) -> torch.Tensor:
+        return z.view(b, t, n_heads, self.head_dim).transpose(1, 2)
+
     def forward(self, x: torch.Tensor, cache: Optional[torch.Tensor] = None):
-        b, t, d = x.shape
-        q, k, v = self.qkv(x).split(d, dim=2)
+        b, t, _d = x.shape
 
-        def split_heads(z):
-            return z.view(b, t, self.n_heads, self.head_dim).transpose(1, 2)
+        q = self._split(self.q_proj(x), self.n_heads, b, t)
+        k = self._split(self.k_proj(x), self.n_kv_heads, b, t)
+        v = self._split(self.v_proj(x), self.n_kv_heads, b, t)
 
-        q, k, v = split_heads(q), split_heads(k), split_heads(v)
-
-        new_cache = None
         if cache is not None:
             past_k, past_v = cache
             k = torch.cat([past_k, k], dim=2)
             v = torch.cat([past_v, v], dim=2)
         new_cache = (k.detach(), v.detach())
 
+        # Broadcast each KV head across its group of query heads.
+        if self.group > 1:
+            k = k.repeat_interleave(self.group, dim=1)
+            v = v.repeat_interleave(self.group, dim=1)
+
         total = k.shape[2]
-        # With cache the query attends over all past keys, so the mask only
-        # needs to hide future positions relative to each query.
         offset = total - t
         mask = torch.triu(
             torch.full((t, total), float("-inf"), device=x.device), diagonal=offset + 1
@@ -53,8 +77,12 @@ class CausalSelfAttention(nn.Module):
         att = (q @ k.transpose(-2, -1)) / self.head_dim ** 0.5 + mask
         att = F.softmax(att, dim=-1)
         att = self.drop(att)
-        out = (att @ v).transpose(1, 2).contiguous().view(b, t, d)
+        out = (att @ v).transpose(1, 2).contiguous().view(b, t, -1)
         return self.proj(out), new_cache
+
+    def kv_cache_bytes(self, batch: int, seq_len: int) -> int:
+        """KV cache footprint, the reason GQA exists."""
+        return 2 * batch * seq_len * self.n_kv_heads * self.head_dim * 4
 
 
 class Block(nn.Module):

@@ -40,28 +40,46 @@ from forge.control.bridge import BridgeOutcome, model_drives_machine, parse_plan
 from forge.control.kernel import ControlKernel
 from forge.control.scope import Op
 
-# The plan grammar, shown to the model verbatim.  Kept short on purpose: a
-# small model conditions better on a few exact lines than on prose.
-GRAMMAR_PROMPT = """You output only lines in this exact grammar. No prose, no code.
-
-goal: <one short line>
+# The plan grammar, sent to the model verbatim.  Kept short deliberately: an
+# earlier 418-token version did not fit a 128-token context at all, so the
+# model was being asked to follow instructions it could not see.  This version
+# measures about 83 tokens with the trained BPE vocabulary.
+GRAMMAR_PROMPT = """Output only plan lines:
+goal: <slug>
 mkdir <path>
 write <path> <<<content>>>
-append <path> <<<content>>>
 read <path>
-list <path>
-stat <path>
-delete <path>
-run_tests <command-name>
-
-Rules:
-- One step per line.
-- Valid <path> values: docs/notes.md, src/report.txt, notes/plan.md
-- Never use an absolute path. Never use ; | & $ ` or > in a path.
-- Write at most 3 steps."""
+run_tests <name>
+Paths must be relative. At most 3 steps."""
 
 # Targets a small model can plausibly emit and that are always in scope.
 SAFE_DEFAULT_PATHS = ["docs/notes.md", "notes/plan.md", "src/notes.md"]
+
+
+def plan_user_turn(task: str, max_steps: int = 3,
+                   rationale: Optional[str] = None) -> str:
+    """The user turn for a plan request.  **Single source of truth.**
+
+    Training data and inference must build this string the same way.  They
+    diverged three separate times during development, each time silently:
+
+      1. the instruction format was absent from training entirely
+      2. there was no ``<eos>``, so the model never learned to stop
+      3. the channel injected ``Judge rationale: ...``, which training had
+         never seen -- the model emitted a *correct* plan and still failed to
+         parse because the surrounding turn was unfamiliar
+
+    Every one of those was invisible until output was decoded and compared.
+    Keeping one function means the two can no longer drift apart, and
+    ``tests/test_pipeline.py`` asserts the channel and the corpus agree.
+    """
+    lines = [f"Task: {task}"]
+    if rationale:
+        # Included only when present, and training covers both forms so the
+        # model is robust to either.
+        lines.append(f"Judge rationale: {rationale}")
+    lines.append(f"Produce at most {max_steps} steps. First line must be the goal.")
+    return "\n".join(lines)
 
 
 def default_fallback_plan(task: str) -> str:
@@ -131,11 +149,7 @@ class ActionChannel:
 
     # ------------------------------------------------------------------
     def _request_plan(self, task: str, ruling: Ruling) -> str:
-        user = (
-            f"Task: {task}\n"
-            f"Judge rationale: {ruling.rationale}\n"
-            f"Produce at most {self.max_steps} steps. First line must be the goal."
-        )
+        user = plan_user_turn(task, self.max_steps, rationale=ruling.rationale)
         return self.backend.complete(GRAMMAR_PROMPT, user, max_tokens=160)
 
     # ------------------------------------------------------------------

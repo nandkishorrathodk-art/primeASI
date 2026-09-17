@@ -14,6 +14,11 @@ import torch.nn.functional as F
 from forge.config import ForgeConfig
 from forge.data import ShapeDataset, corpus_to_tensor, make_corpus, sample_batch
 from forge.model.transformer import ForgeLM
+from forge.tokenizer import BPETokenizer, ByteTokenizer
+
+
+def _default_tokenizer():
+    return ByteTokenizer()
 
 
 @dataclass
@@ -28,9 +33,18 @@ class StepLog:
 
 
 class Trainer:
-    def __init__(self, cfg: ForgeConfig, model: Optional[ForgeLM] = None) -> None:
+    def __init__(
+        self,
+        cfg: ForgeConfig,
+        model: Optional[ForgeLM] = None,
+        tokenizer=None,
+    ) -> None:
         self.cfg = cfg
         self.model = model or ForgeLM(cfg.model)
+        # The tokenizer must travel with the weights.  A checkpoint whose
+        # tokenizer is assumed rather than stored will decode its own output
+        # wrongly the moment the vocabulary changes.
+        self.tokenizer = tokenizer or _default_tokenizer()
         self.opt = torch.optim.AdamW(
             self.model.parameters(),
             lr=cfg.train.lr,
@@ -62,7 +76,7 @@ class Trainer:
         t = self.cfg.train
         torch.manual_seed(t.seed)
         text = text if text is not None else make_corpus()
-        data = corpus_to_tensor(text)
+        data = corpus_to_tensor(text, self.tokenizer)
         self.model.train()
         self.model.to(t.device)
 
@@ -163,14 +177,26 @@ class Trainer:
         torch.save({
             "config": self.cfg.to_dict(),
             "model": self.model.state_dict(),
+            "merges": list(getattr(self.tokenizer, "merges", [])),
             "extra": extra or {},
         }, path)
 
     @staticmethod
-    def load(path: str, map_location: str = "cpu") -> tuple[ForgeLM, ForgeConfig]:
+    def load(
+        path: str, map_location: str = "cpu"
+    ) -> tuple[ForgeLM, ForgeConfig]:
+        model, cfg, _tok = Trainer.load_with_tokenizer(path, map_location)
+        return model, cfg
+
+    @staticmethod
+    def load_with_tokenizer(
+        path: str, map_location: str = "cpu"
+    ) -> tuple[ForgeLM, ForgeConfig, object]:
         ckpt = torch.load(path, map_location=map_location, weights_only=False)
         cfg = ForgeConfig.from_dict(ckpt["config"])
         model = ForgeLM(cfg.model)
         model.load_state_dict(ckpt["model"])
         model.eval()
-        return model, cfg
+        merges = ckpt.get("merges") or []
+        tok = BPETokenizer([tuple(m) for m in merges]) if merges else _default_tokenizer()
+        return model, cfg, tok

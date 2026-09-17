@@ -26,15 +26,18 @@ def local_backend_from_checkpoint(
     max_new_tokens: int = 120,
     temperature: float = 0.8,
 ) -> LocalBackend:
-    """Load a ForgeLM checkpoint and wrap it as a reasoning backend."""
+    """Load a ForgeLM checkpoint and wrap it as a reasoning backend.
+
+    The tokenizer comes out of the checkpoint, never from a module constant.
+    A BPE model decoded with a byte tokenizer produces gibberish with no
+    error raised, which is the worst possible failure mode.
+    """
     from forge.training.trainer import Trainer
 
-    model, _cfg = Trainer.load(path)
-    from forge.tokenizer import TOKENIZER
-
+    model, _cfg, tokenizer = Trainer.load_with_tokenizer(path)
     return LocalBackend(
         model=model,
-        tokenizer=TOKENIZER,
+        tokenizer=tokenizer,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
     )
