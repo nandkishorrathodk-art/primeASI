@@ -110,10 +110,22 @@ class BPETokenizer:
 
     # -- encoding ------------------------------------------------------
     def encode(self, text: str, add_bos: bool = True, add_eos: bool = False) -> list[int]:
+        """Encode text, recognising ``<pad> <bos> <eos> <image>`` as single ids.
+
+        Special strings are matched before merging so they never get split or
+        glued into neighbouring tokens.  Without this, ``<eos>`` would encode
+        as five separate tokens and the model could not learn a clean stop
+        signal -- which is exactly the failure that produced a correct plan
+        followed by the system prompt repeating.
+        """
         ids: list[int] = []
-        for line in text.splitlines(keepends=True):
-            seq = [b + _BYTE_OFFSET for b in line.encode("utf-8")]
-            ids.extend(self._apply(seq))
+        for chunk, special_id in _split_on_specials(text):
+            if special_id is not None:
+                ids.append(special_id)
+                continue
+            for line in chunk.splitlines(keepends=True):
+                seq = [b + _BYTE_OFFSET for b in line.encode("utf-8")]
+                ids.extend(self._apply(seq))
         if add_bos:
             ids = [BOS] + ids
         if add_eos:
@@ -136,14 +148,15 @@ class BPETokenizer:
         return seq
 
     def decode(self, ids: Sequence[int], skip_specials: bool = True) -> str:
+        """Inverse of ``encode``.  Specials are dropped unless kept."""
         raw = bytearray()
         for i in ids:
-            if i < self._byte_offset:
+            if i < _BYTE_OFFSET:
                 if skip_specials:
                     continue
-                raw.extend(b" ")
-            elif i < 256 + self._byte_offset:
-                raw.append(i - self._byte_offset)
+                raw.extend(SPECIALS[i].encode("utf-8"))
+            elif i < _MERGED_BASE:
+                raw.append(i - _BYTE_OFFSET)
             else:
                 raw.extend(_expand(i, self.merges))
         return raw.decode("utf-8", errors="replace")
@@ -177,6 +190,33 @@ class BPETokenizer:
         """
         n = len(self.encode(text, add_bos=False))
         return n / max(len(text), 1)
+
+
+def _split_on_specials(text: str):
+    """Yield ``(chunk, None)`` for ordinary text and ``("", id)`` per special.
+
+    Longest-match-first so a hypothetical ``<eos_extra>`` would not be parsed
+    as ``<eos>`` followed by junk.
+    """
+    ordered = sorted(enumerate(SPECIALS), key=lambda p: -len(p[1]))
+    i = 0
+    buf: list[str] = []
+    while i < len(text):
+        matched = False
+        for sid, name in ordered:
+            if text.startswith(name, i):
+                if buf:
+                    yield "".join(buf), None
+                    buf = []
+                yield "", sid
+                i += len(name)
+                matched = True
+                break
+        if not matched:
+            buf.append(text[i])
+            i += 1
+    if buf:
+        yield "".join(buf), None
 
 
 def _merge_pair(seq: list[int], pair: tuple[int, int], rank: int) -> list[int]:

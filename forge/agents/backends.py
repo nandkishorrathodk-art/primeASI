@@ -159,13 +159,22 @@ class LocalBackend:
     def complete(self, system: str, user: str, max_tokens: int = 400) -> str:
         import torch
 
+        from forge.tokenizer import EOS
+
+        # Mirror the exact shape the training data uses: system, blank line,
+        # user turn, blank line.  A different shape at inference than in
+        # training is the failure this replaces.
         prompt = f"{system}\n\n{user}\n\n"
-        ids = torch.tensor([self.tokenizer.encode(prompt)], dtype=torch.long)
+        ids = torch.tensor([self.tokenizer.encode(prompt, add_bos=True)])
         out = self.model.generate(
             ids,
             max_new_tokens=min(max_tokens, self.max_new_tokens),
             temperature=self.temperature,
             top_k=40,
+            # Stop at <eos> so the model does not run on into the next example
+            # from the corpus.  Without a terminator it produced a correct plan
+            # and then repeated the system prompt.
+            eos_id=EOS,
         )
         text = self.tokenizer.decode(out[0].tolist())
         return text[len(prompt):] if len(text) > len(prompt) else text

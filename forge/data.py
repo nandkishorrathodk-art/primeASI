@@ -64,7 +64,79 @@ PLAN_TASKS = [
     "summarise the vision encoder risks", "record the review outcome",
     "draft the security policy", "log the validation rules",
     "document the failure modes", "note the detection rules",
+    "review the token expiry logic", "record the capacity limits",
+    "note the retry semantics", "document the rollback procedure",
+    "capture the evidence chain", "note the permission model",
+    "record the quarantine policy", "document the audit trail",
+    "review the input validation", "note the rate limits",
+    "document the escalation path", "record the trust ladder",
+    "note the expert routing balance", "document the vision pipeline",
+    "capture the failure injection plan", "note the static analysis rules",
+    "record the scope boundaries", "document the verification steps",
 ]
+
+# Body bullets are chosen by keyword so the content is *derivable* from the
+# task.  Picking them at random would make the target unlearnable: a model
+# cannot predict an arbitrary answer, and no amount of training fixes that.
+BODY_BY_TOPIC = {
+    "parser": ["- reject input you cannot parse", "- fail closed, not open"],
+    "trust": ["- validate at the trust boundary, not in the UI",
+              "- never log credentials"],
+    "threat": ["- record the threat model before the patch",
+               "- one change per review"],
+    "hardening": ["- prefer constant-time comparison for tokens",
+                  "- alert on repeated failures"],
+    "audit": ["- hash-chain every action record",
+              "- report the exact broken index"],
+    "routing": ["- balance on dispatched token counts",
+                "- penalise collapsed experts"],
+    "vision": ["- pool patches into summary tokens",
+               "- keep the encoder small enough to train"],
+    "review": ["- demand evidence for every claim",
+               "- block on high-severity findings"],
+    "security": ["- treat every external field as hostile",
+                 "- log the decision, not the secret"],
+    "validation": ["- validate before the side effect",
+                   "- one rule per input class"],
+    "failure": ["- a partial unverified change is worse than none",
+                "- unwind on verification failure"],
+    "detection": ["- alert on a sustained pattern, not a single event",
+                  "- tune for a low false-positive rate"],
+    "token": ["- rotate on privilege change", "- expire short and reissue"],
+    "capacity": ["- measure the knee before scaling",
+                 "- two times context can cost three times the step"],
+    "retry": ["- exponential backoff with jitter",
+              "- make retried operations idempotent"],
+    "rollback": ["- snapshot before mutating",
+                 "- restore the prior bytes, never just delete"],
+    "evidence": ["- attribute every claim to an agent",
+                 "- cite the test or trace that proves it"],
+    "permission": ["- deny by default", "- grant with a TTL and a budget"],
+    "quarantine": ["- move rather than unlink",
+                   "- keep the original path for restore"],
+    "trail": ["- every entry covers the previous hash",
+              "- anchor the head externally"],
+    "limits": ["- rate limit at thirty requests per minute",
+               "- allow only private ranges unless allowlisted"],
+    "escalation": ["- low confidence forces approval",
+                   "- trust is slow to earn and fast to lose"],
+    "ladder": ["- promote on verified successes only",
+               "- demote to dry run on one failure"],
+    "balance": ["- shared experts carry the common patterns",
+                "- use a scale-free balancing loss"],
+    "pipeline": ["- keep the action channel separate from the debate",
+                 "- record every fallback in the audit chain"],
+    "injection": ["- inject a failure and check the rollback",
+                  "- verify against the machine, not the claim"],
+    "analysis": ["- parse, never execute",
+                 "- flag hardcoded credentials"],
+    "scope": ["- resolve real paths to defeat symlinks",
+              "- reject traversal at the root"],
+    "verification": ["- re-read the filesystem after acting",
+                     "- never trust the model's claim of success"],
+}
+
+DEFERRED_TOPIC = ["- review the task", "- record the outcome"]
 
 PLAN_SLUGS = [
     "harden-the-input-parser", "document-the-trust-boundary",
@@ -73,80 +145,126 @@ PLAN_SLUGS = [
     "summarise-the-encoder-risks", "record-the-review-outcome",
 ]
 
-PLAN_BODIES = [
-    "- validate at the trust boundary, not in the UI\n- never log credentials",
-    "- reject input you cannot parse\n- fail closed, not open",
-    "- hash passwords with a salted slow KDF\n- rotate tokens on privilege change",
-    "- treat every external field as hostile\n- log the decision, not the secret",
-    "- prefer constant-time comparison for tokens\n- alert on repeated failures",
-    "- record the threat model before the patch\n- one change per review",
-]
+
+def slugify(text: str) -> str:
+    """The exact transform the model must learn: lowercase, spaces to hyphens.
+
+    Making this the ground truth is what turns plan generation from an
+    arbitrary recall task into a learnable transformation.
+    """
+    out = []
+    for ch in text.lower().strip():
+        if ch.isalnum():
+            out.append(ch)
+        elif ch in " -_/":
+            if out and out[-1] != "-":
+                out.append("-")
+    return "".join(out).strip("-")
+
+
+def body_for(task: str) -> list[str]:
+    """Pick body bullets by keyword, so the content follows from the task."""
+    low = task.lower()
+    for topic, bullets in BODY_BY_TOPIC.items():
+        if topic in low:
+            return list(bullets)
+    return list(DEFERRED_TOPIC)
+
+
+def grammar_prompt() -> str:
+    """The one grammar prompt, imported lazily to avoid an import cycle."""
+    from forge.agents.act import GRAMMAR_PROMPT
+
+    return GRAMMAR_PROMPT
+
+
+def make_instruct_example(task: str, max_steps: int = 3,
+                          rng: Optional[random.Random] = None,
+                          eos: str = "<eos>") -> str:
+    """One training example shaped exactly like the real inference call.
+
+    This is the fix for the measured failure where the inference prompt
+    format appeared **zero** times in training.  The channel calls the model
+    as ``f"{system}\\n\\n{user}\\n\\n"``; if the training data is not in that
+    exact shape, the model is asked to follow instructions it has never seen
+    and falls back to whatever dominates the corpus.
+
+    Two measured additions:
+
+    * ``max_steps`` mirrors the channel's parameter, because the user turn
+      states the step budget and the model should honour it.
+    * Each example ends with an explicit ``<eos>`` special token.  Without a
+      stop signal the model does not know the answer is finished and continues
+      straight into the next example in the corpus.  A measured run produced a
+      *correct* plan followed immediately by the system prompt again, which is
+      the classic missing-terminator failure.
+    """
+    slug = slugify(task)
+    steps = [
+        f"goal: {slug}",
+        "mkdir docs",
+        f"write docs/{slug}.md <<<",
+        *body_for(task),
+        ">>>",
+    ]
+    if rng is not None and rng.random() < 0.25:
+        steps.append(f"read docs/{slug}.md")
+    plan = "\n".join(steps)
+
+    # Build the user turn with the same function the channel uses, so the two
+    # cannot drift.  Half the examples carry a judge rationale because the
+    # channel sends one, and the model must be robust to both shapes.
+    from forge.agents.act import plan_user_turn
+
+    rationale = None
+    if rng is not None and rng.random() < 0.5:
+        rationale = "no high-severity finding outstanding"
+    user = plan_user_turn(task, max_steps, rationale=rationale)
+    return f"{grammar_prompt()}\n\n{user}\n\n{plan}{eos}"
+
+
+def make_instruct_corpus(n: int = 400, seed: int = 0) -> str:
+    """Many `[system][user][plan]` triples in the exact inference shape."""
+    rng = random.Random(seed)
+    examples = []
+    for _ in range(n):
+        task = rng.choice(PLAN_TASKS)
+        examples.append(make_instruct_example(task, max_steps=3, rng=rng))
+    return "\n\n".join(examples)
+
+
+def iter_plan_examples(n: int = 50, seed: int = 0):
+    """Yield plan blocks alone, which a parser test can isolate."""
+    rng = random.Random(seed)
+    for _ in range(n):
+        task = rng.choice(PLAN_TASKS)
+        slug = slugify(task)
+        body = "\n".join(body_for(task))
+        yield (f"goal: {slug}\nmkdir docs\n"
+               f"write docs/{slug}.md <<<\n{body}\n>>>")
 
 
 def make_grammar_corpus(n: int = 400, seed: int = 0,
                         include_prompts: bool = True) -> str:
-    """Examples in exactly the grammar the action channel asks the model for.
+    """Deprecated shape kept for compatibility; prefer make_instruct_corpus.
 
-    This exists because of a measured gap: the original corpus contained
-    **zero** occurrences of ``mkdir``, ``write``, ``goal:``, ``<<<`` or
-    ``>>>``.  The pipeline was asking the model to emit a language it had
-    never seen a single example of.  No amount of parameters or tokenizer
-    work fixes that; the examples have to be present.
-
-    The prompt comes *before* the plan, matching how the channel actually
-    calls the model.  Reversing that order would train the model to emit a
-    question after its answer.
-
-    ``include_prompts=False`` yields plan blocks alone, which is what the
-    parser tests need: a prompt line is not a plan step and must not be
-    expected to parse as one.
+    Kept because older tests and the tokenizer suite reference it, but the
+    instruction-shaped corpus is what the pipeline actually needs.
     """
-    rng = random.Random(seed)
-    blocks: list[str] = []
-    for _ in range(n):
-        task = rng.choice(PLAN_TASKS)
-        slug = rng.choice(PLAN_SLUGS)
-        body = rng.choice(PLAN_BODIES)
-        pad = " " * rng.choice([0, 0, 2, 4])
-        steps = [
-            "goal: " + slug,
-            "mkdir docs",
-            f"write docs/{slug}.md <<<",
-            body,
-            ">>>",
-        ]
-        if rng.random() < 0.3:
-            steps.append(f"read docs/{slug}.md")
-        if rng.random() < 0.2:
-            steps.append("run_tests run_tests")
-        plan = "\n".join(pad + s for s in steps)
-        if include_prompts:
-            blocks.append(f"Task: {task}\nProduce at most {len(steps)} steps.")
-        blocks.append(plan)
-    return "\n".join(blocks)
-
-
-def iter_plan_examples(n: int = 50, seed: int = 0):
-    """Yield individual plan blocks that should each parse on their own."""
-    slug = "x"
-    rng = random.Random(seed)
-    for _ in range(n):
-        s = rng.choice(PLAN_SLUGS)
-        body = rng.choice(PLAN_BODIES)
-        yield (
-            "goal: " + s + "\n"
-            "mkdir docs\n"
-            f"write docs/{s}.md <<<\n{body}\n>>>"
-        )
+    if include_prompts:
+        return make_instruct_corpus(n, seed)
+    return "\n".join(iter_plan_examples(n, seed))
 
 
 def make_corpus(n_snippets: int = 400, seed: int = 0,
-                grammar_ratio: float = 0.4) -> str:
-    """Structured text: code, prose, agent JSON, and plan-grammar examples.
+                grammar_ratio: float = 0.6) -> str:
+    """Instruction-shaped plan data plus code, prose and agent JSON.
 
-    ``grammar_ratio`` controls how much of the corpus teaches the plan
-    grammar the action channel depends on.  It defaults high because that
-    grammar is what the end-to-end pipeline needs the model to emit.
+    ``grammar_ratio`` defaults to 0.6 rather than 0.4 because a measured
+    experiment showed the plan grammar is the thing that fails: at 40% with
+    the wrong prompt format the model produced 0/3 parseable plans.  The
+    instruction examples are duplicated on purpose, since repeating a
+    transformation is how a small model learns it.
     """
     rng = random.Random(seed)
     parts: list[str] = []
@@ -159,9 +277,10 @@ def make_corpus(n_snippets: int = 400, seed: int = 0,
             parts.append(rng.choice(SECURITY_SNIPPETS))
         else:
             parts.append("\n".join(_random_agent_line(rng) for _ in range(4)))
-    parts.append(make_grammar_corpus(n_grammar, seed=seed + 1))
+    # Weighted heavily: the instruction shape is what the pipeline needs.
+    parts.extend([make_instruct_corpus(n_grammar, seed=seed + 1)] * 3)
     rng.shuffle(parts)
-    return "\n".join(parts)
+    return "\n\n".join(parts)
 
 
 def corpus_to_tensor(text: str, tokenizer=None) -> torch.Tensor:
