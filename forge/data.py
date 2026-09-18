@@ -13,6 +13,7 @@ from typing import Iterator, Optional
 
 import torch
 
+from forge.control.scope import Op
 from forge.tokenizer import TOKENIZER
 
 SECURITY_SNIPPETS = [
@@ -180,7 +181,7 @@ def grammar_prompt() -> str:
 
 def make_instruct_example(task: str, max_steps: int = 3,
                           rng: Optional[random.Random] = None,
-                          eos: str = "<eos>") -> str:
+                          eos: str = "<eos>", grant=None) -> str:
     """One training example shaped exactly like the real inference call.
 
     This is the fix for the measured failure where the inference prompt
@@ -200,14 +201,21 @@ def make_instruct_example(task: str, max_steps: int = 3,
       the classic missing-terminator failure.
     """
     slug = slugify(task)
-    steps = [
-        f"goal: {slug}",
-        "mkdir docs",
-        f"write docs/{slug}.md <<<",
-        *body_for(task),
-        ">>>",
-    ]
-    if rng is not None and rng.random() < 0.25:
+    steps = [f"goal: {slug}"]
+    if grant is None or Op.MKDIR in grant:
+        steps.append("mkdir docs")
+        steps.append(f"write docs/{slug}.md <<<")
+        steps.extend(body_for(task))
+        steps.append(">>>")
+    elif Op.WRITE in grant:
+        steps.append(f"write {slug}.md <<<")
+        steps.extend(body_for(task))
+        steps.append(">>>")
+    else:
+        # Read-only machine: the only faithful plan is to read.
+        steps.append(f"read docs/{slug}.md")
+        steps.append("list docs")
+    if rng is not None and rng.random() < 0.25 and (not grant or Op.READ in grant):
         steps.append(f"read docs/{slug}.md")
     plan = "\n".join(steps)
 
@@ -219,7 +227,7 @@ def make_instruct_example(task: str, max_steps: int = 3,
     rationale = None
     if rng is not None and rng.random() < 0.5:
         rationale = "no high-severity finding outstanding"
-    user = plan_user_turn(task, max_steps, rationale=rationale)
+    user = plan_user_turn(task, max_steps, rationale=rationale, grant=grant)
     return f"{grammar_prompt()}\n\n{user}\n\n{plan}{eos}"
 
 
@@ -230,6 +238,39 @@ def make_instruct_corpus(n: int = 400, seed: int = 0) -> str:
     for _ in range(n):
         task = rng.choice(PLAN_TASKS)
         examples.append(make_instruct_example(task, max_steps=3, rng=rng))
+    return "\n\n".join(examples)
+
+
+# The grants a capability-conditioned corpus varies over.  Deliberately
+# includes both a mutating set and a read-only one, because a corpus that only
+# ever shows "everything allowed" cannot teach a model to notice a restriction.
+GRANT_SETS = [
+    frozenset({Op.READ, Op.LIST, Op.STAT, Op.MKDIR, Op.WRITE}),
+    frozenset({Op.READ, Op.LIST, Op.STAT, Op.WRITE}),
+    frozenset({Op.READ, Op.LIST, Op.STAT}),
+    frozenset({Op.READ, Op.LIST}),
+]
+
+
+def make_capability_corpus(n: int = 800, seed: int = 0) -> str:
+    """Instruction examples where the user turn states the grant and the
+    target plan respects it.
+
+    This is the training half of the capability-conditioning experiment: the
+    measured baseline is that the model proposes mutating operations at a 100%
+    rate regardless of what it is allowed to do, so the corpus must contain
+    examples where the grant genuinely constrains the answer.  Without the
+    read-only examples the model never sees a restricted target and has
+    nothing to learn from.
+    """
+    rng = random.Random(seed)
+    examples = []
+    for _ in range(n):
+        task = rng.choice(PLAN_TASKS)
+        grant = rng.choice(GRANT_SETS)
+        examples.append(
+            make_instruct_example(task, max_steps=3, rng=rng, grant=grant)
+        )
     return "\n\n".join(examples)
 
 
