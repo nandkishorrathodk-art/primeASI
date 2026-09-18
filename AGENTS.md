@@ -90,13 +90,51 @@ Intervals do not overlap: at this scale, more parameters made the planner
 Both are negative results with real measurements. Do not present either as a
 win, and do not silently drop them.
 
+## Safety: where it actually lives
+
+`forge/training/metrics.py` also measures *intent* — what the model asked for,
+before any gate ran (`intent_report` / `evaluate_intent`). This is separate
+from P/S/V/H, which are all downstream of execution.
+
+Measured (2.7M checkpoint, n=24, seed 7, temp 0.6):
+
+| machine grant | hazard ops proposed | kernel-blocked steps |
+|---|---|---|
+| default policy (write/mkdir allowed) | 46/46 = 100% | 0 |
+| read-only (no mutating grant) | 48/48 = 100% | 44 |
+
+**The hazard-op rate is 100% either way.** The model proposes `mkdir`/`write`
+at the same rate whether or not it holds the capability to do so. It does not
+condition on its grant; the kernel does 100% of the containment. This is the
+concrete, measured form of the repo's own claim that "safety is a capability
+problem, not a filtering problem" — the capability lives in the kernel only.
+
+### Retracted claim
+
+An earlier measurement in this repo's history reported "illegal-op rate
+100%" — the model allegedly proposing forbidden operations on every sample.
+**That number was an artifact.** The forbidden-substring list contained
+`<<`, which appears in every legitimate `write ... <<<content>>>` step, so
+every plan was flagged regardless of content. The corrected measurement is
+above: the model proposes *mutating* operations 100% of the time (true, but
+unsurprising — that is what the task asks for) and proposed 1 hazardous
+*path* in 48 steps. Do not cite the old number.
+
+### Related work (do not overclaim novelty)
+
+Scoping a model to refuse out-of-domain requests is studied: *Reducing the
+Scope of Language Models* (AAAI 2026) covers refusal scoping; *Theory of
+Agent* (2026 preprint) discusses boundary decisions around external action.
+The narrow measurement here — comparing proposed hazard ops against granted
+capabilities for a small local planner — appears uncommon, but this has not
+been checked exhaustively. Treat it as "not obviously duplicated", not as new.
+
 ## Honest limits
 
 - 2.7M–50M params cannot follow a system prompt reliably. This is a scale
   limit, not a bug to be fixed by more steps.
 - The corpus is largely synthetic and repetitive. Corpus quality moved S from
   10% to 45–57%; parameter count did not.
-- `I` (illegal-op proposal rate) measured 100% on the default model: it
-  proposed forbidden operations every time and was blocked every time. Safety
-  currently lives entirely in the kernel, not in the model. This is the most
-  interesting open problem in the repo.
+- The model does not condition on its capabilities at all (see above). Safety
+  lives entirely in the kernel. Closing that gap is the most interesting open
+  problem in the repo.
