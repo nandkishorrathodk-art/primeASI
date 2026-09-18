@@ -129,6 +129,68 @@ The narrow measurement here — comparing proposed hazard ops against granted
 capabilities for a small local planner — appears uncommon, but this has not
 been checked exhaustively. Treat it as "not obviously duplicated", not as new.
 
+## Capability conditioning: tested, claim rejected
+
+The obvious follow-up is to tell the model its grant and train the target plan
+to respect it. That was built and measured (`make_capability_corpus` in
+`forge/data.py`, `grant=` on `plan_user_turn` / `generate_plan` /
+`evaluate_intent` / `metrics --grant`), and **the claim failed.**
+
+Claim: *"a model trained with its grant in context proposes fewer out-of-grant
+operations, at no cost to verify rate."*
+
+| eval grant | arm | O (out-of-grant) | V (verify) |
+|---|---|---|---|
+| read-only | baseline | 96.6% | 0.0% |
+| read-only | conditioned | **50.5%** | 0.0% |
+| write | baseline | 3.0% | **70.0%** |
+| write | conditioned | 1.0% | **2.5%** |
+
+n=40, seed 7, temp 0.6, 500 train steps per arm, same architecture.
+
+What is real: on the read-only arm the out-of-grant rate halved, and it is not
+a denominator artifact — out-of-grant proposals per sample fell 2.00 → 1.03
+while steps per sample *rose* 2.07 → 2.47. So the model became somewhat
+sensitive to the stated grant.
+
+Why the claim still fails:
+
+1. **Verify rate collapsed on the write arm (70% → 2.5%).** This is the
+   degenerate solution the experiment was built to detect. Fewer violations
+   did not come from obedience; it came from producing less executable output.
+2. **The conditioned model echoes the grant line** — 9/30 samples, versus
+   0/30 for the baseline. Greedy decoding on a read-only grant still emits
+   `mkdir`/`write`. The condition is being copied, not conditioned on. This is
+   the same prompt-echo trap documented above, now triggered by a new line.
+3. **Read-only V is 0% for both arms by construction.** A read-only machine
+   cannot create the file a `write`-shaped task requires, so the read-only
+   tasks are unsatisfiable regardless of how well-behaved the model is. The O
+   improvement on that arm cannot be validated end-to-end.
+
+Conclusion: at 2.7M parameters, stating a capability grant in context does not
+produce a model that respects it. It produces a model that repeats the grant
+and degrades. Do not retry this expecting a different result without first
+fixing the echo problem (see below).
+
+### What would actually test this
+
+- **Train on a corpus where the grant line varies but the answer is identical
+  when the grant permits it.** Right now the grant both changes the prompt and
+  the target, so obedience and copying are confounded.
+- **Constrain decoding** so the grant line cannot be emitted, then re-measure.
+  Until the echo is removed, O is not a clean measurement.
+- **Scale up.** 2.7M at ~20k params/context-token cannot hold a conditional
+  instruction; every result above is at or below the noise floor of that limit.
+
+## Fixed bugs worth knowing about
+
+- **`CapabilitySet.check` rejected `list`/`stat`/`scan` as "unknown
+  operations"** regardless of grants, so three operations that
+  `default_policy` grants and `_dispatch` implements were unreachable.
+  `GRANTABLE_OPS` now derives the accepted set from the enum, and a test
+  asserts `set(Op) == MUTATING_OPS | OBSERVING_OPS` so a new op cannot be
+  added in one place and forgotten in another.
+
 ## Honest limits
 
 - 2.7M–50M params cannot follow a system prompt reliably. This is a scale

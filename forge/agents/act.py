@@ -56,8 +56,31 @@ Paths must be relative. At most 3 steps."""
 SAFE_DEFAULT_PATHS = ["docs/notes.md", "notes/plan.md", "src/notes.md"]
 
 
+def capability_grant_line(grant=None) -> Optional[str]:
+    """Render a granted operation set for the user turn.
+
+    Why this exists: measured, the model proposes `mkdir`/`write` at a 100%
+    rate whether or not it holds the capability to perform them (n=24,
+    ``AGENTS.md``).  It never conditions on its grant, so the kernel performs
+    every bit of the containment.  Telling the model what it is allowed to do
+    -- and training the target plan to respect it -- is the intervention that
+    this line makes expressible.
+
+    ``None`` means "do not mention a grant", which keeps every existing
+    training example and prompt byte-identical to before.
+    """
+    if grant is None:
+        return None
+    names = sorted(op.value for op in grant)
+    if not names:
+        return "Granted operations: none. Use read-only steps only."
+    return (f"Granted operations: {', '.join(names)}. "
+            f"Do not use any operation outside this list.")
+
+
 def plan_user_turn(task: str, max_steps: int = 3,
-                   rationale: Optional[str] = None) -> str:
+                   rationale: Optional[str] = None,
+                   grant=None) -> str:
     """The user turn for a plan request.  **Single source of truth.**
 
     Training data and inference must build this string the same way.  They
@@ -72,8 +95,14 @@ def plan_user_turn(task: str, max_steps: int = 3,
     Every one of those was invisible until output was decoded and compared.
     Keeping one function means the two can no longer drift apart, and
     ``tests/test_pipeline.py`` asserts the channel and the corpus agree.
+
+    ``grant`` is optional and defaults to ``None``, so omitting it reproduces
+    the historical prompt exactly.
     """
     lines = [f"Task: {task}"]
+    grant_line = capability_grant_line(grant)
+    if grant_line:
+        lines.append(grant_line)
     if rationale:
         # Included only when present, and training covers both forms so the
         # model is robust to either.

@@ -50,6 +50,17 @@ MUTATING_OPS = {
     Op.WRITE, Op.APPEND, Op.COPY, Op.MOVE, Op.MKDIR, Op.DELETE, Op.RUN_TESTS,
 }
 
+# Ops that observe the machine without changing it.  They still require a
+# grant -- absence is denial -- but they are not "unknown operations".
+OBSERVING_OPS = {Op.READ, Op.LIST, Op.STAT, Op.SCAN}
+
+# Every operation that can be granted.  `check` accepted only MUTATING_OPS and
+# READ, which made `list`, `stat`, and `scan` permanently unreachable even
+# though `default_policy` grants all three and `_dispatch` implements all
+# three.  Keeping the accepted set explicit and derived from the enum is what
+# stops a new op from being added in two places and forgotten in a third.
+GRANTABLE_OPS = MUTATING_OPS | OBSERVING_OPS
+
 
 class ScopeDenial(Exception):
     """Raised when an action is outside the granted capability set.
@@ -193,8 +204,16 @@ class CapabilitySet:
 
     # -- checking -------------------------------------------------------
     def check(self, op: Op, path: Optional[str] = None) -> Capability:
-        """Raise ScopeDenial unless a live capability covers this call."""
-        if op not in MUTATING_OPS and op is not Op.READ:
+        """Raise ScopeDenial unless a live capability covers this call.
+
+        Only genuinely unknown operations are rejected here.  `list`, `stat`,
+        and `scan` used to fall into this branch and were unreachable no
+        matter what was granted, which silently contradicted both
+        ``default_policy`` (which grants them) and ``_dispatch`` (which
+        implements them).  A capability check that refuses an operation the
+        policy grants is not a security control; it is a bug that hides one.
+        """
+        if op not in GRANTABLE_OPS:
             raise ScopeDenial(f"unknown operation {op!r}")
 
         resolved = self.guard.resolve(path) if path else None
